@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 backtest.png
 data/
+plan.md
+backtest.md

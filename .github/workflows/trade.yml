@@ -35,9 +35,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -71,7 +71,13 @@ jobs:
 
       - name: Dry run (nur Plan)
         if: steps.mode.outputs.mode == 'dryrun'
-        run: python bot.py --dry-run | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          status=0
+          python bot.py --dry-run > plan.md || status=$?
+          cat plan.md
+          cat plan.md >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Plan (Dry Run)::$(python .github/notice.py < plan.md)"
+          exit $status
 
       - name: Handeln
         if: steps.mode.outputs.mode == 'trade'
@@ -79,11 +85,16 @@ jobs:
 
       - name: Backtest
         if: steps.mode.outputs.mode == 'backtest'
-        run: python backtest.py
+        run: |
+          status=0
+          python backtest.py > backtest.md || status=$?
+          cat backtest.md
+          echo "::notice title=Backtest::$(python .github/notice.py < backtest.md)"
+          exit $status
 
       - name: Backtest-Diagramm hochladen
         if: always() && steps.mode.outputs.mode == 'backtest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: backtest
           path: backtest.png
