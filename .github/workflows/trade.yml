@@ -1,0 +1,111 @@
+name: Trading-Bot
+
+on:
+  schedule:
+    # 15:07 UTC = 11:07 New York (Sommer) bzw. 10:07 (Winter) -> immer waehrend der US-Handelszeit
+    - cron: "7 15 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Was soll passieren?"
+        type: choice
+        required: true
+        default: "dry run (show plan, no trades)"
+        options:
+          - "dry run (show plan, no trades)"
+          - "backtest"
+          - "trade now"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      PYTHONUNBUFFERED: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt matplotlib
+
+      - name: Modus bestimmen
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            mode=trade
+          else
+            case "${{ inputs.action }}" in
+              "trade now") mode=trade ;;
+              "backtest") mode=backtest ;;
+              *) mode=dryrun ;;
+            esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Modus: $mode"
+
+      - name: Secrets pruefen
+        run: |
+          if [ -z "$APCA_API_KEY_ID" ] || [ -z "$APCA_API_SECRET_KEY" ]; then
+            echo "::error::Die Secrets APCA_API_KEY_ID und APCA_API_SECRET_KEY fehlen. Siehe README, Schritt 3."
+            exit 1
+          fi
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Dry run (nur Plan)
+        if: steps.mode.outputs.mode == 'dryrun'
+        run: python bot.py --dry-run | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Handeln
+        if: steps.mode.outputs.mode == 'trade'
+        run: python bot.py
+
+      - name: Backtest
+        if: steps.mode.outputs.mode == 'backtest'
+        run: python backtest.py
+
+      - name: Backtest-Diagramm hochladen
+        if: always() && steps.mode.outputs.mode == 'backtest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest
+          path: backtest.png
+          if-no-files-found: warn
+
+      - name: Tagebuch committen
+        if: always() && steps.mode.outputs.mode == 'trade'
+        run: |
+          git config user.name "trading-bot"
+          git config user.email "trading-bot@users.noreply.github.com"
+          if [ -d journal ]; then git add journal; fi
+          if git diff --cached --quiet; then
+            echo "Keine Aenderungen am Tagebuch."
+            exit 0
+          fi
+          git commit -m "Tagebuch $(date -u +%Y-%m-%d)"
+          for i in 1 2 3 4; do
+            if git pull --rebase --quiet origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((i * 5))
+          done
+          echo "::warning::Tagebuch konnte nicht gepusht werden."
+          exit 0

@@ -1,0 +1,10 @@
+{
+  "watchlist": ["SPY", "QQQ", "IWM", "EFA", "TLT", "GLD"],
+  "benchmark": "SPY",
+  "sma_fast": 50,
+  "sma_slow": 200,
+  "max_position_pct": 20,
+  "cash_reserve_pct": 5,
+  "trailing_stop_pct": 10,
+  "cooldown_days": 10
+}
