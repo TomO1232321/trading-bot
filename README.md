@@ -87,8 +87,8 @@ das ist normal.
 
 ## 5. Ergebnisse lesen
 
-- **Im Workflow-Lauf**: Auf der Übersichtsseite eines Laufs (unter „Summary“) steht das
-  Tagebuch bzw. die Backtest-Tabelle. Beim Backtest gibt es unten unter **Artifacts** das
+- **Im Workflow-Lauf**: Auf der Übersichtsseite eines Laufs (unter „Summary“ bzw. als
+  blaue Notiz „Plan (Dry Run)“ / „Backtest“) steht das Tagebuch bzw. die Backtest-Tabelle. Beim Backtest gibt es unten unter **Artifacts** das
   Diagramm `backtest` (ZIP mit `backtest.png`).
 - **Im Ordner `journal/`** (wird nach jedem Handelslauf automatisch committet):
   - `JJJJ-MM-TT.md` – Tagebuch des Tages: Kontostand, Signal-Tabelle, Aktionen, Fehler
@@ -109,6 +109,9 @@ das ist normal.
   Cash, Anleihen und Gold, und er wird bei Rücksetzern ausgestoppt und kauft später teurer
   zurück.
 - In Seitwärtsphasen gibt es Fehlsignale (rein, raus, rein …) – das kostet.
+- Der kostenlose IEX-Datenfeed von Alpaca hat nicht für alle ETFs Kurse ab 2018. Der
+  Backtest startet deshalb automatisch erst, wenn alle ETFs 200 Tage Historie haben
+  (aktuell ca. Mai 2021), und schreibt das in die Tabelle.
 - Ein Backtest zeigt die Vergangenheit. Die Zukunft kann anders aussehen.
 - Paper-Trading ist idealisiert (perfekte Ausführungen, keine Steuern, keine Gefühle).
 
