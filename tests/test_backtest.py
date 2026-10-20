@@ -111,6 +111,22 @@ class TestStops(unittest.TestCase):
         self.assertTrue(all(res.invested[i] == 0 for i in within))
 
 
+class TestFairStart(unittest.TestCase):
+    def test_start_moves_to_first_day_with_enough_history(self):
+        c = cfg()
+        data = dataset()
+        data["GLD"] = data["GLD"][300:]  # GLD-Daten beginnen spaeter
+        res = run_backtest(c, data, START)
+        self.assertEqual(res.dates[0], data["GLD"][c.sma_slow - 1].date)
+        self.assertTrue(res.notes)
+        self.assertGreater(res.invested[2], 0)  # Bot investiert sofort, nicht erst nach Monaten
+
+    def test_no_shift_when_history_is_complete(self):
+        res = run_backtest(cfg(), dataset(), START)
+        self.assertEqual(res.dates[0], START)
+        self.assertEqual(res.notes, [])
+
+
 class TestReportAndCli(unittest.TestCase):
     def test_report_and_csv_cli(self):
         data = dataset()

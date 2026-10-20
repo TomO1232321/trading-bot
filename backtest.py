@@ -35,6 +35,7 @@ class Result:
     stops: int = 0
     executions: int = 0
     open_positions: int = 0
+    notes: List[str] = field(default_factory=list)
 
 
 class History:
@@ -61,13 +62,20 @@ def run_backtest(cfg: Config, data: Dict[str, List[Bar]], start: date, end: Opti
     if cfg.benchmark not in data or not data[cfg.benchmark]:
         raise ValueError(f"Keine Kurse fuer die Benchmark {cfg.benchmark}")
     hist = {s: History(data.get(s, [])) for s in set(cfg.watchlist) | {cfg.benchmark}}
-    calendar = [d for d in hist[cfg.benchmark].dates if d >= start and (end is None or d <= end)]
+    # Faire Startlinie: erst vergleichen, wenn jeder ETF genug Historie fuer SMA_slow hat.
+    # Sonst saesse der Bot am Anfang nur deshalb im Cash, weil Daten fehlen.
+    ready = [h.dates[cfg.sma_slow - 1] for s, h in hist.items() if len(h.dates) >= cfg.sma_slow]
+    effective = max([start] + ready)
+    res = Result()
+    if effective > start:
+        res.notes.append(f"Start von {start} auf {effective} verschoben: Erst ab dann haben alle ETFs "
+                         f"{cfg.sma_slow} Handelstage Kurshistorie (kostenloser IEX-Feed beginnt spaeter).")
+    calendar = [d for d in hist[cfg.benchmark].dates if d >= effective and (end is None or d <= end)]
     if len(calendar) < 2:
         raise ValueError("Zu wenige Handelstage im gewaehlten Zeitraum")
     slip = slippage_bps / 10_000.0
     ts = cfg.trailing_stop_pct / 100.0
 
-    res = Result()
     cash = initial
     pos: Dict[str, dict] = {}
     cooldown_until: Dict[str, date] = {}
@@ -190,7 +198,7 @@ def report(cfg: Config, res: Result) -> str:
     out = [f"### Backtest {res.dates[0]} bis {res.dates[-1]} – Bot vs. Buy-and-Hold {cfg.benchmark}", "",
            f"| Kennzahl | Bot | Buy-and-Hold {cfg.benchmark} |", "|---|---:|---:|"]
     out += [f"| {a} | {x} | {y} |" for a, x, y in rows]
-    out += ["", verdict(cfg, b, h), "",
+    out += [""] + [f"_{n}_" for n in res.notes] + ["", verdict(cfg, b, h), "",
             f"_Annahmen: Entscheidung zum Schlusskurs, Ausfuehrung am naechsten Morgen zum Eroeffnungskurs, "
             f"{SLIPPAGE_BPS:g} Basispunkte Slippage je Ausfuehrung, Kurse dividendenbereinigt (adjustment=all), "
             f"keine Steuern. {res.open_positions} Position(en) am Ende noch offen. "
@@ -212,8 +220,11 @@ def verdict(cfg: Config, b: dict, h: dict) -> str:
         head = f"**Ehrliches Fazit: Einfach {cfg.benchmark} kaufen und halten war besser** – der Bot hatte"
         return f"{head} {ret} und {dd}."
     elif not more_ret:
-        head = (f"**Ehrliches Fazit: Bei der Rendite war Buy-and-Hold {cfg.benchmark} besser**, "
-                f"der Bot war {'aber ruhiger' if better_sharpe else 'trotzdem nicht effizienter'}:")
+        risk = ("pro Risiko war der Bot sogar effizienter" if better_sharpe
+                else "auch pro Risiko war Buy-and-Hold besser")
+        return (f"**Ehrliches Fazit: Bei der Rendite war Buy-and-Hold {cfg.benchmark} klar besser.** "
+                f"Der Bot hatte {ret}, dafuer aber {dd}. Sharpe {b['sharpe']:.2f} gegen "
+                f"{h['sharpe']:.2f}: {risk}.")
     else:
         head = "**Ehrliches Fazit: Gemischt** –"
     return f"{head} der Bot hatte {ret} und {dd}."
