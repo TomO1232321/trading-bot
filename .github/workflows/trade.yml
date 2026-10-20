@@ -59,15 +59,15 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "Modus: $mode"
 
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
       - name: Secrets pruefen
         run: |
           if [ -z "$APCA_API_KEY_ID" ] || [ -z "$APCA_API_SECRET_KEY" ]; then
             echo "::error::Die Secrets APCA_API_KEY_ID und APCA_API_SECRET_KEY fehlen. Siehe README, Schritt 3."
             exit 1
           fi
-
-      - name: Tests
-        run: python -m unittest discover -s tests -t .
 
       - name: Dry run (nur Plan)
         if: steps.mode.outputs.mode == 'dryrun'
