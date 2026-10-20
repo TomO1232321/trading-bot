@@ -221,5 +221,45 @@ class TestSafety(BotTestCase):
         self.assertIn("zu wenig", read(os.path.join(self.journal, "2024-06-03.md")))
 
 
+class TestOptionalFeaturesInBot(BotTestCase):
+    def test_partial_sell_cancels_stop_and_resizes_it(self):
+        c = cfg(slot_mode="dynamic", max_position_pct=50, rebalance_band_pct=25)
+        bars = {s: bars_from_closes(downtrend(), LAST_CLOSE_DAY) for s in c.watchlist}
+        bars["SPY"] = all_up_bars()["SPY"]
+        price = bars["SPY"][-1].close
+        b = FakeBroker(bars, cash=0, positions={"SPY": 900})
+        stop = b.add_order(symbol="SPY", side="sell", type="trailing_stop", qty="900", trail_percent="10",
+                           time_in_force="gtc", client_order_id="tb-old-stop")
+        bot, code = self.run_bot(b, config=c)
+        self.assertEqual(code, 0, bot.errors)
+        target = int(900 * price * 0.5 // price)
+        self.assertEqual(b.positions["SPY"], target)
+        self.assertEqual(b._find(stop["id"])["status"], "canceled")
+        stops = b.open_stops("SPY")
+        self.assertEqual([o["qty"] for o in stops], [str(target)])
+
+    def test_no_stops_when_disabled(self):
+        b = FakeBroker(all_up_bars(), positions={"SPY": 10})
+        old = b.add_order(symbol="SPY", side="sell", type="trailing_stop", qty="10", trail_percent="10",
+                          time_in_force="gtc", client_order_id="tb-old")
+        bot, code = self.run_bot(b, config=cfg(trailing_stop_pct=0))
+        self.assertEqual(code, 0, bot.errors)
+        self.assertEqual(b._find(old["id"])["status"], "canceled")
+        self.assertEqual(b.open_stops(), [])
+        self.assertEqual(len(b.positions), 6)
+
+    def test_top_up_existing_position(self):
+        c = cfg(slot_mode="dynamic", max_position_pct=50, rebalance_band_pct=25)
+        bars = {s: bars_from_closes(downtrend(), LAST_CLOSE_DAY) for s in c.watchlist}
+        bars["SPY"] = all_up_bars()["SPY"]
+        b = FakeBroker(bars, cash=95_000, positions={"SPY": 10})
+        bot, code = self.run_bot(b, config=c)
+        self.assertEqual(code, 0, bot.errors)
+        price = bars["SPY"][-1].close
+        self.assertGreater(b.positions["SPY"] * price, 40_000)
+        self.assertGreaterEqual(b.cash, 0.05 * float(b.get_account()["equity"]))
+        self.assertEqual([o["qty"] for o in b.open_stops("SPY")], [f"{b.positions['SPY']:g}"])
+
+
 if __name__ == "__main__":
     unittest.main()

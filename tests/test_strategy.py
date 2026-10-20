@@ -72,7 +72,10 @@ class TestConfig(unittest.TestCase):
         self.bad(max_position_pct=150)
         self.bad(cash_reserve_pct=100)
         self.bad(cash_reserve_pct=-1)
-        self.bad(trailing_stop_pct=0)
+        self.bad(trailing_stop_pct=0.05)
+        self.bad(trailing_stop_pct=60)
+        self.bad(top_n=7)
+        self.bad(slot_mode="random")
         self.bad(cooldown_days=-1)
         self.bad(sma_fast=2.5)
         self.bad(sma_fast=True)
@@ -165,6 +168,66 @@ class TestPlan(unittest.TestCase):
                  sigs({s: NODATA for s in c.watchlist}))
         self.assertFalse(p.buys or p.sells)
         self.assertEqual(len(p.notes), 6)
+
+
+def msigs(states_mom, price=100.0):
+    from strategy import Signal
+    return {s: Signal(s, st, price, price, price, None, m) for s, (st, m) in states_mom.items()}
+
+
+class TestOptionalFeatures(unittest.TestCase):
+    def test_defaults_keep_original_behaviour(self):
+        c = cfg()
+        self.assertEqual((c.top_n, c.slot_mode, c.rebalance_band_pct), (0, "fixed", 0.0))
+        self.assertEqual(c.target_slot_pct(1), c.slot_pct)
+
+    def test_stop_zero_means_off(self):
+        self.assertEqual(cfg(trailing_stop_pct=0).trailing_stop_pct, 0)
+
+    def test_momentum_value(self):
+        closes = [100.0] * 100 + [110.0] * 30
+        s = signal("SPY", bars_from_closes(closes, date(2024, 5, 31)), cfg(sma_fast=5, sma_slow=20,
+                                                                          momentum_days=126))
+        self.assertAlmostEqual(s.momentum, 0.10)
+        s = signal("SPY", bars_from_closes(closes[:50], date(2024, 5, 31)), cfg(momentum_days=126))
+        self.assertIsNone(s.momentum)
+
+    def test_top_n_buys_strongest_and_sells_dropped(self):
+        c = cfg(top_n=2, slot_mode="dynamic", max_position_pct=50)
+        st = {"SPY": (HOLD, 0.05), "QQQ": (HOLD, 0.20), "IWM": (HOLD, 0.10), "EFA": (OUT, 0.30),
+              "TLT": (HOLD, 0.01), "GLD": (HOLD, None)}
+        p = plan(c, 100_000, 50_000, {"SPY": 100}, {s: 100 for s in c.watchlist}, msigs(st))
+        self.assertEqual([(t.symbol, t.qty) for t in p.sells], [("SPY", 100)])
+        self.assertEqual([t.symbol for t in p.buys], ["QQQ", "IWM"])
+        # dynamisch: 95 % / 2 = 47,5 % je ETF
+        self.assertEqual(p.buys[0].qty, int(100_000 * 0.475 / 101))
+
+    def test_dynamic_slots_capped_by_max_position(self):
+        c = cfg(slot_mode="dynamic", max_position_pct=35)
+        st = {s: (OUT, 0) for s in c.watchlist}
+        st["QQQ"] = (HOLD, 0.1)
+        p = plan(c, 100_000, 100_000, {}, {s: 100 for s in c.watchlist}, msigs(st))
+        self.assertEqual(p.buys[0].qty, int(35_000 / 101))
+
+    def test_rebalance_trims_and_tops_up(self):
+        c = cfg(slot_mode="dynamic", max_position_pct=50, rebalance_band_pct=25)
+        st = {s: (OUT, 0) for s in c.watchlist}
+        st["SPY"] = (HOLD, 0.1)
+        st["QQQ"] = (HOLD, 0.1)
+        # Ziel je 47.500 $ = 475 Stueck. SPY 800 Stueck (zu gross), QQQ 100 Stueck (zu klein)
+        p = plan(c, 100_000, 10_000, {"SPY": 800, "QQQ": 100}, {s: 100 for s in c.watchlist}, msigs(st))
+        self.assertEqual([(t.symbol, t.qty) for t in p.sells], [("SPY", 325)])
+        self.assertEqual(p.buys[0].symbol, "QQQ")
+        self.assertLessEqual(p.buys[0].qty, 375)
+        self.assertGreater(p.buys[0].qty, 300)
+
+    def test_rebalance_inside_band_does_nothing(self):
+        c = cfg(slot_mode="dynamic", max_position_pct=50, rebalance_band_pct=25)
+        st = {s: (OUT, 0) for s in c.watchlist}
+        st["SPY"] = (HOLD, 0.1)
+        st["QQQ"] = (HOLD, 0.1)
+        p = plan(c, 100_000, 5_000, {"SPY": 500, "QQQ": 430}, {s: 100 for s in c.watchlist}, msigs(st))
+        self.assertFalse(p.sells or p.buys)
 
 
 if __name__ == "__main__":

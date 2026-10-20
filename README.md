@@ -77,6 +77,7 @@ Die Namen müssen exakt so geschrieben sein (Großbuchstaben, Unterstriche).
 3. Im Auswahlmenü **action**:
    - **dry run (show plan, no trades)** – zeigt nur, was der Bot tun *würde*. Ideal für den Anfang.
    - **backtest** – testet die Regeln auf Kursen seit 2018 und vergleicht mit SPY.
+   - **compare variants** – vergleicht mehrere Regel-Varianten ehrlich miteinander.
    - **trade now** – handelt jetzt sofort (nur wenn die US-Börse offen ist).
 4. Grüner Knopf **Run workflow**. Nach ca. 1 Minute auf den Lauf klicken.
 
@@ -139,6 +140,20 @@ pro ETF eine Datei wie `SPY.csv` mit den Spalten `date,open,high,low,close`.
 | `cash_reserve_pct` | 5 | So viel % bleibt immer Cash |
 | `trailing_stop_pct` | 10 | Abstand des Trailing Stops in % |
 | `cooldown_days` | 10 | Tage Sperre nach Stop-Auslösung |
+
+**Optionale Einstellungen** (fehlen sie, verhält sich der Bot wie oben beschrieben):
+
+| Einstellung | Standard | Bedeutung |
+|---|---|---|
+| `trailing_stop_pct` | 10 | `0` schaltet den Trailing Stop ganz ab |
+| `top_n` | 0 | `0` = alle ETFs mit Aufwärtstrend halten; z. B. `3` = nur die 3 mit dem stärksten Momentum |
+| `momentum_days` | 126 | Momentum = Kursveränderung über so viele Handelstage (≈ 6 Monate) |
+| `slot_mode` | `"fixed"` | `"dynamic"` = das Geld auf die tatsächlich gehaltenen ETFs verteilen (weniger Cash) |
+| `rebalance_band_pct` | 0 | z. B. `25` = Positionen nachkaufen/verkleinern, wenn sie über 25 % vom Ziel abweichen |
+
+Welche Kombination sinnvoll ist, zeigt im Workflow die Auswahl **„compare variants“**: Sie
+testet mehrere Varianten, wählt die beste nur anhand der Jahre bis Ende 2023 aus und prüft
+sie dann ehrlich auf den Jahren ab 2024, die zum Auswählen nicht benutzt wurden.
 
 Die Datei wird beim Start geprüft (z. B. muss `sma_fast` kleiner als `sma_slow` sein,
 keine doppelten ETFs). Ein Fehler bricht den Lauf mit einer verständlichen Meldung ab.

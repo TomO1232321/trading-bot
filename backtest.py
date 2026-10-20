@@ -16,11 +16,11 @@ import math
 import os
 import statistics
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
-from strategy import Bar, Config, ConfigError, load_config, plan, signal
+from strategy import Bar, Config, ConfigError, config_from_dict, load_config, plan, signal
 
 SLIPPAGE_BPS = 5.0
 
@@ -96,17 +96,33 @@ def run_backtest(cfg: Config, data: Dict[str, List[Bar]], start: date, end: Opti
         if pending is not None:
             for t in pending.sells:
                 bar = hist[t.symbol].on(d)
-                if bar and t.symbol in pos:
-                    close_position(t.symbol, bar.open * (1 - slip), d, "Signal")
+                if not bar or t.symbol not in pos:
+                    continue
+                price = bar.open * (1 - slip)
+                p = pos[t.symbol]
+                if t.qty >= p["qty"]:
+                    close_position(t.symbol, price, d, "Signal")
+                else:  # Teilverkauf (Nachjustieren); neuer Stop -> Hochpunkt neu ab heute
+                    cash += t.qty * price
+                    p["qty"] -= t.qty
+                    p["hwm"] = bar.open
+                    res.executions += 1
             for t in pending.buys:
                 bar = hist[t.symbol].on(d)
-                if not bar or t.symbol in pos:
+                if not bar:
                     continue
                 price = bar.open * (1 + slip)
                 qty = min(int(t.qty), math.floor(cash / price))
-                if qty >= 1:
-                    cash -= qty * price
-                    res.executions += 1
+                if qty < 1:
+                    continue
+                cash -= qty * price
+                res.executions += 1
+                if t.symbol in pos:  # Aufstocken: Durchschnittspreis, neuer Stop ab heute
+                    p = pos[t.symbol]
+                    p["entry"] = (p["entry"] * p["qty"] + price * qty) / (p["qty"] + qty)
+                    p["qty"] += qty
+                    p["hwm"] = bar.open
+                else:
                     pos[t.symbol] = {"qty": qty, "entry": price, "date": d, "hwm": bar.open}
             pending = None
         if i == 1:  # Buy-and-Hold kauft am selben Tag wie die erste moegliche Bot-Ausfuehrung
@@ -118,7 +134,7 @@ def run_backtest(cfg: Config, data: Dict[str, List[Bar]], start: date, end: Opti
         # 2) Trailing Stops im Tagesverlauf (gegen Tagestief, bei Kurslücke zum Eroeffnungskurs)
         for sym in list(pos):
             bar = hist[sym].on(d)
-            if not bar:
+            if not bar or ts == 0:
                 continue
             stop = pos[sym]["hwm"] * (1 - ts)
             if bar.open <= stop:
@@ -231,6 +247,12 @@ def verdict(cfg: Config, b: dict, h: dict) -> str:
 
 
 def plot(res: Result, cfg: Config, path: str = "backtest.png") -> bool:
+    return plot_curves(res.dates, [("Bot", res.bot, "#2a78d6"),
+                                   (f"Buy-and-Hold {cfg.benchmark}", res.bench, "#eb6834")], path)
+
+
+def plot_curves(dates, series, path: str = "backtest.png") -> bool:
+    """series: Liste von (Name, Kontowerte, Farbe)."""
     try:
         import matplotlib
 
@@ -239,10 +261,9 @@ def plot(res: Result, cfg: Config, path: str = "backtest.png") -> bool:
     except ImportError:
         print("matplotlib nicht installiert – kein Diagramm.", file=sys.stderr)
         return False
-    blue, orange, ink, muted, grid = "#2a78d6", "#eb6834", "#2b2b29", "#6b6a64", "#e4e3de"
+    ink, muted, grid = "#2b2b29", "#6b6a64", "#e4e3de"
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True,
                                    gridspec_kw={"height_ratios": [3, 1.3]}, facecolor="#fcfcfb")
-    series = [("Bot", res.bot, blue), (f"Buy-and-Hold {cfg.benchmark}", res.bench, orange)]
     for ax in (ax1, ax2):
         ax.set_facecolor("#fcfcfb")
         ax.grid(axis="y", color=grid, linewidth=0.8)
@@ -252,14 +273,14 @@ def plot(res: Result, cfg: Config, path: str = "backtest.png") -> bool:
             ax.spines[s].set_color(grid)
         ax.tick_params(colors=muted, labelsize=9)
     for name, eq, color in series:
-        ax1.plot(res.dates, eq, color=color, linewidth=2, label=name)
-        ax1.annotate(f"{name}\n{eq[-1]:,.0f} $", (res.dates[-1], eq[-1]), xytext=(6, 0),
+        ax1.plot(dates, eq, color=color, linewidth=2, label=name)
+        ax1.annotate(f"{name}\n{eq[-1]:,.0f} $", (dates[-1], eq[-1]), xytext=(6, 0),
                      textcoords="offset points", va="center", fontsize=9, color=ink)
         peak, dd = eq[0], []
         for v in eq:
             peak = max(peak, v)
             dd.append((v / peak - 1) * 100)
-        ax2.plot(res.dates, dd, color=color, linewidth=1.5, label=name)
+        ax2.plot(dates, dd, color=color, linewidth=1.5, label=name)
     ax1.set_title("Kontowert (Start 100.000 $)", loc="left", fontsize=12, color=ink)
     ax1.legend(frameon=False, loc="upper left", fontsize=9, labelcolor=ink)
     ax1.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
@@ -269,6 +290,101 @@ def plot(res: Result, cfg: Config, path: str = "backtest.png") -> bool:
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return True
+
+
+# --------------------------------------------------------------------------
+# Varianten ehrlich vergleichen (Einstell-Jahre vs. Pruef-Jahre)
+# --------------------------------------------------------------------------
+
+_DYN = {"slot_mode": "dynamic", "max_position_pct": 35, "rebalance_band_pct": 25}
+VARIANTS = [
+    ("A: aktuell (Stop 10 %)", {}),
+    ("B: Stop 15 %", {"trailing_stop_pct": 15}),
+    ("C: Stop 20 %", {"trailing_stop_pct": 20}),
+    ("D: ohne Stop", {"trailing_stop_pct": 0}),
+    ("E: ohne Stop + Nachinvestieren", {"trailing_stop_pct": 0, **_DYN}),
+    ("F: Top 3 Momentum, ohne Stop", {"trailing_stop_pct": 0, "top_n": 3, **_DYN}),
+    ("G: Top 3 Momentum + Stop 15 %", {"trailing_stop_pct": 15, "top_n": 3, **_DYN}),
+]
+
+
+def variant_config(cfg: Config, overrides: dict) -> Config:
+    raw = asdict(cfg)
+    raw["watchlist"] = list(raw["watchlist"])
+    raw.update(overrides)
+    return config_from_dict(raw)
+
+
+def compare_variants(cfg: Config, data: Dict[str, List[Bar]], start: date, split: date,
+                     end: Optional[date] = None, initial: float = 100_000.0):
+    """Jede Variante auf drei Zeitraeumen: Einstellen (bis split), Pruefen (ab split), gesamt."""
+    rows = []
+    for name, overrides in VARIANTS:
+        vc = variant_config(cfg, overrides)
+        tune = run_backtest(vc, data, start, split - timedelta(days=1), initial)
+        test = run_backtest(vc, data, split, end, initial)
+        full = run_backtest(vc, data, start, end, initial)
+        rows.append({"name": name, "tune": tune, "test": test, "full": full,
+                     "m_tune": metrics(tune.dates, tune.bot), "m_test": metrics(test.dates, test.bot),
+                     "m_full": metrics(full.dates, full.bot)})
+    return rows
+
+
+def variants_report(cfg: Config, rows, split: date) -> str:
+    r0 = rows[0]
+    bench = {k: metrics(r0[k].dates, r0[k].bench) for k in ("tune", "test", "full")}
+
+    def p(x):
+        return f"{x * 100:+.1f} %"
+
+    tune_span = f"{r0['tune'].dates[0]} bis {r0['tune'].dates[-1]}"
+    test_span = f"{r0['test'].dates[0]} bis {r0['test'].dates[-1]}"
+    out = [f"### Varianten-Vergleich – ehrlich getrennt in Einstell- und Pruefjahre", "",
+           f"- **Einstellen:** {tune_span} (daraus wird die beste Variante gewaehlt)",
+           f"- **Pruefen:** {test_span} (diese Jahre wurden zum Auswaehlen NICHT benutzt)", "",
+           "| Variante | Rendite/Jahr (Einstellen) | Sharpe (Einstellen) | Rendite/Jahr (Pruefen) | "
+           "Sharpe (Pruefen) | Max. Verlust (Pruefen) | Rendite/Jahr gesamt | Max. Verlust gesamt | "
+           "investiert | Trades |",
+           "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for r in rows:
+        a, b, c = r["m_tune"], r["m_test"], r["m_full"]
+        inv = statistics.fmean(r["full"].invested) * 100
+        out.append(f"| {r['name']} | {p(a['cagr'])} | {a['sharpe']:.2f} | {p(b['cagr'])} | {b['sharpe']:.2f} | "
+                   f"{p(b['mdd'])} | {p(c['cagr'])} | {p(c['mdd'])} | {inv:.0f} % | {len(r['full'].trades)} |")
+    a, b, c = bench["tune"], bench["test"], bench["full"]
+    out.append(f"| **Buy-and-Hold {cfg.benchmark}** | {p(a['cagr'])} | {a['sharpe']:.2f} | {p(b['cagr'])} | "
+               f"{b['sharpe']:.2f} | {p(b['mdd'])} | {p(c['cagr'])} | {p(c['mdd'])} | 100 % | 1 |")
+
+    best = max(rows, key=lambda r: r["m_tune"]["sharpe"])
+    bt, cur = best["m_test"], rows[0]["m_test"]
+    out += ["", f"**Auswahl nach den Einstell-Jahren (beste Sharpe-Ratio): {best['name']}.**", ""]
+    verdict_lines = [
+        f"In den Pruefjahren brachte diese Variante {p(bt['cagr'])} pro Jahr "
+        f"(aktueller Bot: {p(cur['cagr'])}, Buy-and-Hold {cfg.benchmark}: {p(bench['test']['cagr'])}) "
+        f"bei einem groessten Verlust von {p(bt['mdd'])} (Buy-and-Hold: {p(bench['test']['mdd'])}).",
+    ]
+    if best is rows[0]:
+        verdict_lines.append("Der aktuelle Bot bleibt also die beste Wahl unter den Varianten.")
+    elif bt["sharpe"] >= cur["sharpe"] + 0.05:
+        verdict_lines.append("Sie war also auch auf unbekannten Daten besser (pro Risiko) als der aktuelle Bot.")
+    elif bt["sharpe"] > cur["sharpe"] - 0.05:
+        verdict_lines.append("Pro Risiko war sie auf unbekannten Daten etwa gleich gut wie der aktuelle Bot.")
+    else:
+        verdict_lines.append("Auf unbekannten Daten war sie NICHT besser als der aktuelle Bot – "
+                             "der Vorsprung in den Einstell-Jahren war wohl Zufall.")
+    best_cagr = max(r["m_full"]["cagr"] for r in rows)
+    verdict_lines.append(f"Keine Variante erreicht 25 % pro Jahr (beste ueber den ganzen Zeitraum: "
+                         f"{p(best_cagr)})." if best_cagr < 0.25 else
+                         "Achtung: Eine Variante zeigt ueber 25 % pro Jahr – bei so wenigen Jahren ist das "
+                         "sehr wahrscheinlich Glueck und kein verlaesslicher Vorteil.")
+    out += [" ".join(verdict_lines), "",
+            f"_Hinweise: {len(rows)} Varianten getestet – je mehr man testet, desto eher sieht eine nur "
+            "zufaellig gut aus. Annahmen wie beim normalen Backtest (Ausfuehrung zum naechsten Eroeffnungskurs, "
+            f"{SLIPPAGE_BPS:g} Basispunkte Slippage, keine Steuern)._"]
+    notes = sorted({n for r in rows for k in ("tune", "full") for n in r[k].notes})
+    out += [f"_{n}_" for n in notes]
+    out.append("")
+    return "\n".join(out), best
 
 
 # --------------------------------------------------------------------------
@@ -298,6 +414,8 @@ def main(argv=None) -> int:
     ap.add_argument("--csv-dir", default=None, help="Ordner mit SYMBOL.csv (Spalten date,open,high,low,close)")
     ap.add_argument("--initial", type=float, default=100_000.0)
     ap.add_argument("--plot", default="backtest.png")
+    ap.add_argument("--variants", action="store_true", help="mehrere Varianten ehrlich vergleichen")
+    ap.add_argument("--split", default="2024-01-01", help="ab hier beginnen die Pruefjahre (--variants)")
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config)
@@ -320,17 +438,30 @@ def main(argv=None) -> int:
             print(f"FEHLER: {e}", file=sys.stderr)
             return 2
     try:
-        res = run_backtest(cfg, data, start, end, initial=args.initial)
-    except ValueError as e:
+        if args.variants:
+            rows = compare_variants(cfg, data, start, date.fromisoformat(args.split), end, args.initial)
+            text, best = variants_report(cfg, rows, date.fromisoformat(args.split))
+        else:
+            res = run_backtest(cfg, data, start, end, initial=args.initial)
+            text = report(cfg, res)
+    except (ValueError, ConfigError) as e:
         print(f"FEHLER: {e}", file=sys.stderr)
         return 2
-    text = report(cfg, res)
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(text + "\n")
-    if args.plot and plot(res, cfg, args.plot):
+    if args.variants:
+        full0, fullb = rows[0]["full"], best["full"]
+        series = [(rows[0]["name"], full0.bot, "#2a78d6"),
+                  (f"Buy-and-Hold {cfg.benchmark}", full0.bench, "#eb6834")]
+        if best is not rows[0]:
+            series.insert(1, (best["name"], fullb.bot, "#1baf7a"))
+        ok = args.plot and plot_curves(full0.dates, series, args.plot)
+    else:
+        ok = args.plot and plot(res, cfg, args.plot)
+    if ok:
         print(f"Diagramm gespeichert: {args.plot}", file=sys.stderr)
     return 0
 

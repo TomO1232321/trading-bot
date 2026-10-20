@@ -20,13 +20,13 @@ from typing import Dict, List, Optional
 
 from alpaca import AlpacaClient, AlpacaError, LiveTradingRefused, ny_date, parse_ts, to_ny
 from strategy import (
+    BUY_BUFFER,
     Config,
     ConfigError,
     completed_bars,
     load_config,
     plan,
     signal,
-    size_buys,
 )
 
 PREFIX = "tb-"
@@ -259,14 +259,16 @@ class Bot:
                 if qty <= 0:
                     self.notes.append(f"{t.symbol}: Position schon weg (Stop ausgeloest?) – kein Verkauf noetig")
                     continue
+                # Ganze Position oder (beim Nachjustieren) nur einen Teil verkaufen
+                sell_qty = pos["qty"] if t.qty >= qty else str(int(t.qty))
                 o = self.broker.submit_order({
-                    "symbol": t.symbol, "qty": pos["qty"], "side": "sell", "type": "market",
+                    "symbol": t.symbol, "qty": sell_qty, "side": "sell", "type": "market",
                     "time_in_force": "day", "client_order_id": self.cid("sell", t.symbol),
                 })
                 o = self.wait_for(o["id"], {"filled"})
                 if o.get("status") == "filled":
                     self.actions.append(
-                        f"VERKAUFT {pos['qty']} {t.symbol} zu {fnum(float(o.get('filled_avg_price') or 0))} $ – {t.reason}")
+                        f"VERKAUFT {sell_qty} {t.symbol} zu {fnum(float(o.get('filled_avg_price') or 0))} $ – {t.reason}")
                 else:
                     self.notes.append(f"{t.symbol}: Verkaufsorder noch nicht ausgefuehrt (Status {o.get('status')})")
             except Exception as e:
@@ -275,13 +277,18 @@ class Bot:
     def execute_buys(self, buys, prices) -> None:
         if not buys:
             return
+        # Nach den Verkaeufen mit dem echten Cash nachrechnen: Reserve und 1 % Puffer bleiben unangetastet.
         acct = self.broker.get_account()
         equity, cash = float(acct["equity"]), float(acct["cash"])
-        sized, notes = size_buys(self.cfg, equity, cash, [t.symbol for t in buys], prices)
-        self.notes.extend(notes)
-        planned = {t.symbol: t for t in buys}
-        for sym, qty, price in sized:
-            qty = min(qty, int(planned[sym].qty))
+        available = cash - equity * self.cfg.cash_reserve_pct / 100.0
+        for t in buys:
+            sym = t.symbol
+            price = prices.get(sym) or t.price
+            qty = min(int(t.qty), math.floor(max(0.0, available) / (price * (1 + BUY_BUFFER))))
+            if qty < 1:
+                self.notes.append(f"{sym}: nach den Verkaeufen zu wenig Cash – Kauf uebersprungen")
+                continue
+            available -= qty * price * (1 + BUY_BUFFER)
             try:
                 o = self.broker.submit_order({
                     "symbol": sym, "qty": str(qty), "side": "buy", "type": "market",
@@ -290,7 +297,7 @@ class Bot:
                 o = self.wait_for(o["id"], {"filled"})
                 if o.get("status") == "filled":
                     self.actions.append(
-                        f"GEKAUFT {qty} {sym} zu {fnum(float(o.get('filled_avg_price') or 0))} $ – {planned[sym].reason}")
+                        f"GEKAUFT {qty} {sym} zu {fnum(float(o.get('filled_avg_price') or 0))} $ – {t.reason}")
                 else:
                     self.notes.append(f"{sym}: Kauforder noch nicht ausgefuehrt (Status {o.get('status')})")
             except Exception as e:
@@ -306,7 +313,7 @@ class Bot:
             try:
                 stops = [o for o in open_own if o["symbol"] == sym and is_stop(o)]
                 qty = int(math.floor(positions.get(sym, 0)))
-                if sym in selling or qty < 1:
+                if sym in selling or qty < 1 or cfg.trailing_stop_pct == 0:
                     for o in stops:
                         self.cancel_and_wait(o)
                         self.actions.append(f"Ueberfluessigen Stop fuer {sym} storniert")
@@ -381,8 +388,10 @@ class Bot:
                              f"{pct(bench)} – {verdict}")
             lines.append("")
         if self.signals:
-            lines.append(f"| ETF | Kurs | SMA{cfg.sma_fast} | SMA{cfg.sma_slow} | Signal | gehalten | Cooldown |")
-            lines.append("|---|---:|---:|---:|---|---:|---|")
+            mom_col = cfg.top_n > 0
+            lines.append(f"| ETF | Kurs | SMA{cfg.sma_fast} | SMA{cfg.sma_slow} | Signal | gehalten | Cooldown |"
+                         + (" Momentum |" if mom_col else ""))
+            lines.append("|---|---:|---:|---:|---|---:|---|" + ("---:|" if mom_col else ""))
             for sym in cfg.watchlist:
                 s = self.signals.get(sym)
                 if not s:
@@ -391,7 +400,8 @@ class Bot:
                 held = self.positions.get(sym, 0)
                 cd = self.cooldown.get(sym)
                 lines.append(f"| {sym} | {fnum(s.close)} | {fnum(s.sma_fast)} | {fnum(s.sma_slow)} | {state} | "
-                             f"{held:g} | {'bis ' + cd.isoformat() if cd else '–'} |")
+                             f"{held:g} | {'bis ' + cd.isoformat() if cd else '–'} |"
+                             + (f" {pct(s.momentum * 100) if s.momentum is not None else '–'} |" if mom_col else ""))
             asof = next((s.as_of for s in self.signals.values() if s.as_of), None)
             if asof:
                 lines.append("")

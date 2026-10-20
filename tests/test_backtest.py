@@ -160,5 +160,23 @@ class TestReportAndCli(unittest.TestCase):
         self.assertAlmostEqual(m["mdd"], -0.5)
 
 
+class TestVariants(unittest.TestCase):
+    def test_no_stop_variant_rides_through_crash(self):
+        bars, days, k = TestStops().crash_data(gap=True)
+        res = run_backtest(cfg(watchlist=["SPY"], trailing_stop_pct=0), {"SPY": bars}, days[220])
+        self.assertEqual(res.stops, 0)
+
+    def test_variant_comparison_report(self):
+        rows = backtest.compare_variants(cfg(), dataset(), START, date(2020, 1, 1))
+        text, best = backtest.variants_report(cfg(), rows, date(2020, 1, 1))
+        self.assertEqual(len(rows), len(backtest.VARIANTS))
+        self.assertIn(best, rows)
+        self.assertIn("Pruefen", text)
+        self.assertIn("Buy-and-Hold SPY", text)
+        # Pruefjahre wirklich getrennt: beginnen am Split, Einstelljahre enden davor
+        self.assertGreaterEqual(rows[0]["test"].dates[0], date(2020, 1, 1))
+        self.assertLess(rows[0]["tune"].dates[-1], date(2020, 1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

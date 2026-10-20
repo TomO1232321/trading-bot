@@ -14,6 +14,7 @@ on:
         options:
           - "dry run (show plan, no trades)"
           - "backtest"
+          - "compare variants"
           - "trade now"
 
 permissions:
@@ -53,6 +54,7 @@ jobs:
             case "${{ inputs.action }}" in
               "trade now") mode=trade ;;
               "backtest") mode=backtest ;;
+              "compare variants") mode=variants ;;
               *) mode=dryrun ;;
             esac
           fi
@@ -92,8 +94,17 @@ jobs:
           echo "::notice title=Backtest::$(python .github/notice.py < backtest.md)"
           exit $status
 
+      - name: Varianten vergleichen
+        if: steps.mode.outputs.mode == 'variants'
+        run: |
+          status=0
+          python backtest.py --variants > backtest.md || status=$?
+          cat backtest.md
+          echo "::notice title=Varianten::$(python .github/notice.py < backtest.md)"
+          exit $status
+
       - name: Backtest-Diagramm hochladen
-        if: always() && steps.mode.outputs.mode == 'backtest'
+        if: always() && (steps.mode.outputs.mode == 'backtest' || steps.mode.outputs.mode == 'variants')
         uses: actions/upload-artifact@v5
         with:
           name: backtest
